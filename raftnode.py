@@ -3,6 +3,8 @@ import sys
 import os
 from random import randint
 import threading
+import time
+import socket
 '''
 A RAFT RPC server class.
 
@@ -20,17 +22,19 @@ class RaftNode(rpyc.Service):
 	"""
 	def __init__(self, config, server_no):
 		config_file = os.path.realpath(config)
-		file = open(config_file, r)
+		file = open(config_file, 'r')
 		content = file.read()
 		file.close()
-		content_list = file.split("\r\n")
+		content_list = content.split("\n")
+		del content_list[len(content_list)-1]
+		confdict = {}
 		for element in content_list:
 			a, b = element.split(': ')
 			confdict.update({a: b})
-		self.no_of_servers = confdict["N"]
+		self.no_of_servers = int(confdict["N"])
 		self.majority = (self.no_of_servers // 2) + 1
 		del confdict["N"]
-		del confdict["node"+str(server_no)]
+		del confdict["node"+str(int(server_no)-1)]
 		self.server_list = []
 		for a, b in confdict.items():
 			self.server_list.append(b)
@@ -38,7 +42,12 @@ class RaftNode(rpyc.Service):
 		self.term = 0
 		self.leaderID = -1
 		self.__ID = server_no
-		self.startLoop()
+
+		timeout_val = randint(150, 300)
+		timeout_val = timeout_val / 1000
+		self.node_timeout = threading.Timer(timeout_val, self.beginElection)
+		self.node_timeout.start()
+		print("state: " + str(self.state))
 
 	'''
 		state 0 = follower
@@ -64,8 +73,8 @@ class RaftNode(rpyc.Service):
 		returns current term and if receiver succeeded in updating
 	"""
 	def exposed_AppendEntries(self, term, leaderId):
-		if term > self.term && self.leaderID == leaderId:
-			self.election_timeout.cancel()
+		if term > self.term and self.leaderID == leaderId:
+			self.node_timeout.cancel()
 			self.term = term
 			return(self.term, True)
 		else:
@@ -105,32 +114,74 @@ class RaftNode(rpyc.Service):
 	election in case no RequestVote or AppendEntries is called
 	'''
 	def startLoop(self):
-		while True:
-			timeout_val = randint(0.15, 0.3)
-			self.election_timeout = threading.Timer(timeout_val, self.beginElection)
-			self.election_timeout.start()
+		timeout_val = randint(3000, 5000)
+		timeout_val = timeout_val / 1000
+		self.node_timeout = threading.Timer(timeout_val, self.beginElection)
+		self.node_timeout.start()
+		print("state: " + str(self.state))
 	'''
-	self.becomeCandidate
-	State switch to Candidate and calls for an election, and checks if
-	voteGranted is True (indicates it has majority vote)
+	self.beginElection
+	State switch to Candidate and calls for an election, and starts
+	election for the leader
 	'''
 	def beginElection(self):
-		vote = 0
+		self.term += 1
+		vote = 1
 		self.state = 1
 		conn_list = []
-		for n in range(self.no_of_servers):
-			conn_list.append(try_conn(n))
-		for n in range(self.no_of_servers):
+		for n in range(self.no_of_servers-1):
+			conn_list.append(self.try_conn(n))
+		for n in range(self.no_of_servers-1):
 			if conn_list[n] != False:
-				term, answer = conn_list[n].RequestVote(self.term, self.__ID)
+				try:
+					term, answer = conn_list[n].RequestVote(self.term, self.__ID)
+				except ConnectionRefusedError:
+					term, answer = (self.term, False)
 				if answer:
-					vote += 1		
+					vote += 1
+		if vote >= self.majority:
+			self.state = 2
+			print("I am the leader!")
+			if not self.startLeading():
+				self.state = 0
+				self.startLoop()
+		else:
+			self.startLoop()
+
+	'''
+	try_conn returns either the root RPC or False
+	if connection is not working
+	'''
+	def try_conn(self, n):
+		try:
+			a, b = self.server_list[n].split(':')
+			print(a, b)
+			conn = rpyc.connect(a, b)
+			return conn.root
+
+		except socket.error:
+			return False
 
 	def startLeading(self):
 		self.leaderID = self.__ID
+		Leading = True
+		conn_list = []
+		while Leading:
+			for n in range(self.no_of_servers-1):
+				conn_list.append(self.try_conn(n))
+			for n in range(self.no_of_servers-1):
+				if conn_list[n] != False:
+					try:
+						term, answer = conn_list[n].AppendEntries(self.term, self.leaderID)
+					except ConnectionRefusedError:
+						term, answer = (self.term, -1)
+					if not answer:
+						Leading = False
+						return False
+
 
 
 if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
-	server = ThreadPoolServer(RaftNode(sys.argv[1], sys.argv[2]), port = sys.argv[3])
+	server = ThreadPoolServer(RaftNode(sys.argv[1], sys.argv[2]), port = int(sys.argv[3]))
 	server.start()
