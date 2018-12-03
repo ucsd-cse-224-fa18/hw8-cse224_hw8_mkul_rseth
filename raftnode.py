@@ -7,7 +7,7 @@ import time
 import socket
 '''
 A RAFT RPC server class.
-
+m
 Please keep the signature of the is_leader() method unchanged (though
 implement the body of that function correctly.  You will need to add
 other methods to implement ONLY the leader election part of the RAFT
