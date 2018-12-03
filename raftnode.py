@@ -40,14 +40,12 @@ class RaftNode(rpyc.Service):
 			self.server_list.append(b)
 		self.state = 0
 		self.term = 0
-		self.leaderID = -1
-		self.__ID = server_no
-
-		timeout_val = randint(150, 300)
-		timeout_val = timeout_val / 1000
-		self.node_timeout = threading.Timer(timeout_val, self.beginElection)
-		self.node_timeout.start()
-		print("state: " + str(self.state))
+		self.leaderID = None
+		self.ID = server_no
+		self.Voted = False
+		self.termLock = threading.Lock()
+		self.timerThread = threading.Thread(target=self.startLoop)
+		self.timerThread.start()
 
 	'''
 		state 0 = follower
@@ -64,7 +62,7 @@ class RaftNode(rpyc.Service):
         CHANGE THIS METHOD TO RETURN THE APPROPRIATE RESPONSE
 	'''
 	def exposed_is_leader(self):
-		if self.leaderID == self.__ID:
+		if self.leaderID == self.ID:
 			return True
 		else:
 			return False
@@ -73,39 +71,39 @@ class RaftNode(rpyc.Service):
 		returns current term and if receiver succeeded in updating
 	"""
 	def exposed_AppendEntries(self, term, leaderId):
-		if term > self.term and self.leaderID == leaderId:
+		if term == self.term:
 			self.node_timeout.cancel()
-			self.term = term
+			self.termLock.acquire()
+			self.leaderID = leaderId
+			self.termLock.release()
 			return(self.term, True)
+		elif term > self.term:
+			self.node_timeout.cancel()
+			self.termLock.acquire()
+			self.term = term
+			self.leaderID = leaderId
+			self.termLock.release()
 		else:
 			return(self.term, False)
 
 	def exposed_RequestVote(self, term, candidateID):
-		if self.state == 0:
-			if term > self.term:
-				self.node_timeout.cancel()
-				self.leaderID = candidateID
-				self.term = term
-				return(self.term, True)
-			else:
-				return(self.term, False)
-		elif self.state == 1:
-			if term >= self.term:
-				self.node_timeout.cancel()
-				self.leaderID = candidateID
-				self.term = term
-				return(self.term, True)
-			else:
-				return(self.term, False)
-		elif self.state == 2:
-			if term > self.term:
-				self.node_timeout.cancel()
-				self.leaderID = candidateID
-				self.term = term
-				return(self.term, True)
-			else:
-				return(self.term, False)
-
+		if term > self.term and not self.Voted:
+			self.node_timeout.cancel()
+			self.termLock.acquire()
+			self.term = term
+			self.leaderID = candidateID
+			self.Voted = True
+			self.termLock.release()
+			return(term, True)
+		elif term == self.term and not self.Voted:
+			self.node_timeout.cancel()
+			self.termLock.acquire()
+			self.leaderID = candidateID
+			self.Voted = True
+			self.termLock.release()
+			return(self.term, True)
+		else:
+			return(self.term, False)
 
 	'''
 	self.startLoop()
@@ -114,39 +112,54 @@ class RaftNode(rpyc.Service):
 	election in case no RequestVote or AppendEntries is called
 	'''
 	def startLoop(self):
-		timeout_val = randint(3000, 5000)
-		timeout_val = timeout_val / 1000
-		self.node_timeout = threading.Timer(timeout_val, self.beginElection)
-		self.node_timeout.start()
-		print("state: " + str(self.state))
+		while True:
+			timeout_val = randint(3000, 5000)
+			timeout_val = timeout_val / 1000
+			self.node_timeout = threading.Timer(float(timeout_val), self.beginElection)
+			self.node_timeout.start()
+			self.node_timeout.join()
+			self.Voted = False
+			print("\n" + str(self.leaderID) + " is my leader with term: " + str(self.term) + " and my ID is " + str(self.ID))
+#			print("ID:" + str(self.ID) + " state: " + str(self.state))
 	'''
 	self.beginElection
 	State switch to Candidate and calls for an election, and starts
 	election for the leader
 	'''
 	def beginElection(self):
+		self.termLock.acquire()
 		self.term += 1
+		self.termLock.release()
+		print("Candidate term = " + str(self.term))
 		vote = 1
 		self.state = 1
 		conn_list = []
 		for n in range(self.no_of_servers-1):
 			conn_list.append(self.try_conn(n))
 		for n in range(self.no_of_servers-1):
-			if conn_list[n] != False:
-				try:
-					term, answer = conn_list[n].RequestVote(self.term, self.__ID)
-				except ConnectionRefusedError:
-					term, answer = (self.term, False)
-				if answer:
-					vote += 1
+			try:
+				if conn_list[n] != False:
+					try:
+						term, answer = conn_list[n].RequestVote(self.term, self.ID)
+						if term > self.term and not answer:
+							self.state = 0
+							self.termLock.acquire()
+							self.term = term
+							self.termLock.release()
+							return
+					except ConnectionRefusedError:
+						term, answer = (self.term, False)
+					if answer:
+						vote += 1
+			except EOFError:
+				continue
+		print("\nVotes I got: " + str(vote))
 		if vote >= self.majority:
+			self.leaderID = self.ID
 			self.state = 2
-			print("I am the leader!")
-			if not self.startLeading():
-				self.state = 0
-				self.startLoop()
-		else:
-			self.startLoop()
+			print("\n" + str(self.ID) + " is the leader!")
+			self.startLeading()
+		return
 
 	'''
 	try_conn returns either the root RPC or False
@@ -155,29 +168,43 @@ class RaftNode(rpyc.Service):
 	def try_conn(self, n):
 		try:
 			a, b = self.server_list[n].split(':')
-			print(a, b)
 			conn = rpyc.connect(a, b)
 			return conn.root
 
 		except socket.error:
 			return False
+		except EOFError:
+			return False
 
 	def startLeading(self):
-		self.leaderID = self.__ID
+		self.leaderID = self.ID
 		Leading = True
 		conn_list = []
 		while Leading:
+			time.sleep(0.5)
 			for n in range(self.no_of_servers-1):
 				conn_list.append(self.try_conn(n))
+			vote = 1
 			for n in range(self.no_of_servers-1):
-				if conn_list[n] != False:
-					try:
-						term, answer = conn_list[n].AppendEntries(self.term, self.leaderID)
-					except ConnectionRefusedError:
-						term, answer = (self.term, -1)
-					if not answer:
-						Leading = False
-						return False
+				try:
+					if conn_list[n] != False:
+						try:
+							term, answer = conn_list[n].AppendEntries(self.term, self.leaderID)
+						except ConnectionRefusedError:
+							term, answer = (self.term, -1)
+						except TypeError:
+							term, answer = (self.term, -1)
+						if term > self.term and not answer:
+							Leading = False
+							break
+						if answer:
+							vote+= 1
+				except EOFError:
+					continue
+			if vote <= self.majority:
+				print("\n" + str(self.ID) + " not leader")
+				self.state=0
+				Leading = False
 
 
 
