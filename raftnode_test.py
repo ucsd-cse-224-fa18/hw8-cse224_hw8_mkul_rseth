@@ -113,13 +113,13 @@ class RaftNode(rpyc.Service):
 	'''
 	def startLoop(self):
 		while True:
-			timeout_val = randint(2500, 3500)
+			timeout_val = randint(3000, 5000)
 			timeout_val = timeout_val / 1000
 			self.node_timeout = threading.Timer(float(timeout_val), self.beginElection)
 			self.node_timeout.start()
 			self.node_timeout.join()
 			self.Voted = False
-			#print("\n" + str(self.leaderID) + " is my leader with term: " + str(self.term) + " and my ID is " + str(self.ID))
+			print("\n" + str(self.leaderID) + " is my leader with term: " + str(self.term) + " and my ID is " + str(self.ID))
 #			print("ID:" + str(self.ID) + " state: " + str(self.state))
 	'''
 	self.beginElection
@@ -130,7 +130,7 @@ class RaftNode(rpyc.Service):
 		self.termLock.acquire()
 		self.term += 1
 		self.termLock.release()
-		#print("Candidate term = " + str(self.term))
+		print("Candidate term = " + str(self.term))
 		vote = 1
 		self.state = 1
 		conn_list = []
@@ -153,11 +153,11 @@ class RaftNode(rpyc.Service):
 						vote += 1
 			except EOFError:
 				continue
-		#print("\nVotes I got: " + str(vote))
+		print("\nVotes I got: " + str(vote))
 		if vote >= self.majority:
 			self.leaderID = self.ID
 			self.state = 2
-			#print("\n" + str(self.ID) + " is the leader!")
+			print("\n" + str(self.ID) + " is the leader!")
 			self.startLeading()
 		return
 
@@ -202,7 +202,7 @@ class RaftNode(rpyc.Service):
 				except EOFError:
 					continue
 			if vote <= self.majority:
-				#print("\n" + str(self.ID) + " not leader")
+				print("\n" + str(self.ID) + " not leader")
 				self.state=0
 				Leading = False
 
