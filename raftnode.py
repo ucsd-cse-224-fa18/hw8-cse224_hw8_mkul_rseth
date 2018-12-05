@@ -88,7 +88,7 @@ class RaftNode(rpyc.Service):
 			self.leaderID = self.ID
 			self.leaderLoop()
 		else:
-			#print("exit thread")
+			print("exit thread")
 			pass
 
 	def leaderLoop(self):
@@ -112,7 +112,7 @@ class RaftNode(rpyc.Service):
 					vote += 1
 			if vote < self.majority:
 				break
-		#print("broken!")
+		print("broken!")
 		self.NodeBegin()
 
 	def exposed_AppendEntries(self, term, leaderId):
@@ -125,7 +125,7 @@ class RaftNode(rpyc.Service):
 			self.currentTerm = term
 			self.leaderID = leaderId
 			self.fileLock.release()
-			#print("\n" + str(self.leaderID) + " is my leader with term: " + str(term) + " and my ID is " + str(self.ID))
+			print("\n" + str(self.leaderID) + " is my leader with term: " + str(term) + " and my ID is " + str(self.ID))
 			return (self.currentTerm, True)
 
 	def exposed_RequestVote(self, term, candidateId):
@@ -146,5 +146,5 @@ class RaftNode(rpyc.Service):
 
 if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
-	server = ThreadPoolServer(RaftNode(sys.argv[1]), port = 6000)
+	server = ThreadPoolServer(RaftNode(sys.argv[1], sys.argv[2]), port = int(sys.argv[3]))
 	server.start()
