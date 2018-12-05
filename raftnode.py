@@ -34,18 +34,35 @@ class RaftNode(rpyc.Service):
 		self.no_of_servers = int(confdict["N"])
 		self.majority = (self.no_of_servers // 2) + 1
 		del confdict["N"]
-		del confdict["node"+str(int(server_no)-1)]
+		del confdict["node"+str(int(server_no))]
 		self.server_list = []
 		for a, b in confdict.items():
 			self.server_list.append(b)
-		self.currentTerm = -1
+		self.stateFile = open("node"+str(server_no)+".txt", "w+")
+		self.stateFile.close()
+		if self.is_non_zero_file(self.stateFile.name):
+			self.currentTerm, self.votedFor = self.check_state_file(self.stateFile.name)
+			self.currentTerm = int(currentTerm)
+			self.votedFor = int(votedFor)
+		else:
+			self.currentTerm = -1
+			self.votedFor = None
 		self.leaderID = None
 		self.ID = server_no
-		self.votedFor = None
 		self.stop_leader = threading.Event()
 		self.fileLock = threading.Lock()
 		self.timerThread = threading.Thread(target=self.NodeBegin)
 		self.timerThread.start()
+
+	def check_state_file(self, fname):
+		last = ''
+		with open(fname, "rb") as f:
+			lines = f.read().splitlines()
+			last = lines[-1]
+		return tuple(last.split(','))
+
+	def is_non_zero_file(self, fpath):
+		return os.stat(fpath).st_size != 0
 
 	def exposed_is_leader(self):
 		if self.leaderID == self.ID:
@@ -53,13 +70,16 @@ class RaftNode(rpyc.Service):
 		else:
 			return False
 
+	def update_state_file(self, fname):
+		with open(fname, 'a') as fp:
+			fp.write(str(self.currentTerm) + ',' + str(self.votedFor) + '\n')
+
 	def NodeBegin(self):
 		while True:
-			timeout_val = randint(20, 50)
+			timeout_val = randint(20, 40)
 			timeout_val = timeout_val / 10
 			self.stop_leader.clear()
 			self.Voted = False
-			self.votedFor = None
 			self.node_timeout = threading.Timer(float(timeout_val), self.beginElection)
 			self.node_timeout.start()
 			self.node_timeout.join()
@@ -69,6 +89,7 @@ class RaftNode(rpyc.Service):
 		self.currentTerm += 1
 		self.votedFor = self.ID
 		self.Voted = True
+		self.update_state_file(self.stateFile.name)
 		self.fileLock.release()
 		vote = 1
 		for n in range(self.no_of_servers-1):
@@ -81,7 +102,7 @@ class RaftNode(rpyc.Service):
 			except EOFError:
 				term, answer = (self.currentTerm, False)
 			except socket.error:
-  				term, answer = (self.currentTerm, False)
+				term, answer = (self.currentTerm, False)
 			if answer:
 				vote += 1
 		if vote > self.majority:
@@ -94,6 +115,7 @@ class RaftNode(rpyc.Service):
 	def leaderLoop(self):
 		while True:
 			if self.stop_leader.is_set():
+				#print("leader break event!")
 				self.stop_leader.clear()
 				break
 			vote = 1
@@ -107,7 +129,7 @@ class RaftNode(rpyc.Service):
 				except EOFError:
 					term, answer = (self.currentTerm, False)
 				except socket.error:
-	  				term, answer = (self.currentTerm, False)
+					term, answer = (self.currentTerm, False)
 				if answer:
 					vote += 1
 			if vote < self.majority:
@@ -134,15 +156,12 @@ class RaftNode(rpyc.Service):
 			self.node_timeout.cancel()
 			self.currentTerm = term
 			self.votedFor = candidateId
+			self.update_state_file(self.stateFile.name)
 			self.Voted = True
 			self.fileLock.release()
 			return(self.currentTerm, True)
 		else:
 			return (self.currentTerm, False)
-
-	def stop(self):
-		self.stop_leader.wait(5)
-
 
 if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
