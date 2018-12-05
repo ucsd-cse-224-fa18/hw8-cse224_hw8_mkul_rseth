@@ -34,6 +34,6 @@ class RaftNode(rpyc.Service):
 
 if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
-	server = ThreadPoolServer(RaftNode(sys.argv[1]), port = 6000)
+	server = ThreadPoolServer(RaftNode(sys.argv[1]), sys.argv[2])
 	server.start()
 
