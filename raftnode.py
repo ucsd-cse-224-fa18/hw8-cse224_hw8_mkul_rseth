@@ -1,13 +1,13 @@
 import rpyc
 import sys
 import os
-from random import randint
 import threading
+from random import randint
 import time
 import socket
+
 '''
 A RAFT RPC server class.
-m
 Please keep the signature of the is_leader() method unchanged (though
 implement the body of that function correctly.  You will need to add
 other methods to implement ONLY the leader election part of the RAFT
@@ -17,8 +17,8 @@ class RaftNode(rpyc.Service):
 
 
 	"""
-        Initialize the class using the config file provided and also initialize
-        any datastructures you may need.
+		Initialize the class using the config file provided and also initialize
+		any datastructures you may need.
 	"""
 	def __init__(self, config, server_no):
 		config_file = os.path.realpath(config)
@@ -38,177 +38,113 @@ class RaftNode(rpyc.Service):
 		self.server_list = []
 		for a, b in confdict.items():
 			self.server_list.append(b)
-		self.state = 0
-		self.term = 0
+		self.currentTerm = -1
 		self.leaderID = None
 		self.ID = server_no
-		self.Voted = False
-		self.termLock = threading.Lock()
-		self.timerThread = threading.Thread(target=self.startLoop)
+		self.votedFor = None
+		self.stop_leader = threading.Event()
+		self.fileLock = threading.Lock()
+		self.timerThread = threading.Thread(target=self.NodeBegin)
 		self.timerThread.start()
 
-	'''
-		state 0 = follower
-		state 1 = candidate
-		state 2 = leader
-	'''
-	'''
-        x = is_leader(): returns True or False, depending on whether
-        this node is a leader
-
-        As per rpyc syntax, adding the prefix 'exposed_' will expose this
-        method as an RPC call
-
-        CHANGE THIS METHOD TO RETURN THE APPROPRIATE RESPONSE
-	'''
 	def exposed_is_leader(self):
 		if self.leaderID == self.ID:
 			return True
 		else:
 			return False
-	"""
-		AppendEntries updates the receiver nodes with the term
-		returns current term and if receiver succeeded in updating
-	"""
-	def exposed_AppendEntries(self, term, leaderId):
-		if term == self.term:
-			self.node_timeout.cancel()
-			self.termLock.acquire()
-			self.leaderID = leaderId
-			self.termLock.release()
-			return(self.term, True)
-		elif term > self.term:
-			self.node_timeout.cancel()
-			self.termLock.acquire()
-			self.term = term
-			self.leaderID = leaderId
-			self.termLock.release()
-		else:
-			return(self.term, False)
 
-	def exposed_RequestVote(self, term, candidateID):
-		if term > self.term and not self.Voted:
-			self.node_timeout.cancel()
-			self.termLock.acquire()
-			self.term = term
-			self.leaderID = candidateID
-			self.Voted = True
-			self.termLock.release()
-			return(term, True)
-		elif term == self.term and not self.Voted:
-			self.node_timeout.cancel()
-			self.termLock.acquire()
-			self.leaderID = candidateID
-			self.Voted = True
-			self.termLock.release()
-			return(self.term, True)
-		else:
-			return(self.term, False)
-
-	'''
-	self.startLoop()
-	Encapsulates all the states in one big loop. We have the
-	follower state running currently. The timer starts the
-	election in case no RequestVote or AppendEntries is called
-	'''
-	def startLoop(self):
+	def NodeBegin(self):
 		while True:
-			timeout_val = randint(2500, 3500)
-			timeout_val = timeout_val / 1000
+			timeout_val = randint(20, 50)
+			timeout_val = timeout_val / 10
+			self.stop_leader.clear()
+			self.Voted = False
+			self.votedFor = None
 			self.node_timeout = threading.Timer(float(timeout_val), self.beginElection)
 			self.node_timeout.start()
 			self.node_timeout.join()
-			self.Voted = False
-			#print("\n" + str(self.leaderID) + " is my leader with term: " + str(self.term) + " and my ID is " + str(self.ID))
-#			print("ID:" + str(self.ID) + " state: " + str(self.state))
-	'''
-	self.beginElection
-	State switch to Candidate and calls for an election, and starts
-	election for the leader
-	'''
+
 	def beginElection(self):
-		self.termLock.acquire()
-		self.term += 1
-		self.termLock.release()
-		#print("Candidate term = " + str(self.term))
+		self.fileLock.acquire()
+		self.currentTerm += 1
+		self.votedFor = self.ID
+		self.Voted = True
+		self.fileLock.release()
 		vote = 1
-		self.state = 1
-		conn_list = []
-		for n in range(self.no_of_servers-1):
-			conn_list.append(self.try_conn(n))
 		for n in range(self.no_of_servers-1):
 			try:
-				if conn_list[n] != False:
-					try:
-						term, answer = conn_list[n].RequestVote(self.term, self.ID)
-						if term > self.term and not answer:
-							self.state = 0
-							self.termLock.acquire()
-							self.term = term
-							self.termLock.release()
-							return
-					except ConnectionRefusedError:
-						term, answer = (self.term, False)
-					if answer:
-						vote += 1
+				a, b = self.server_list[n].split(':')
+				conn = rpyc.connect(a, b).root
+				term, answer = conn.RequestVote(self.currentTerm, self.ID)
+			except ConnectionRefusedError:
+				term, answer = (self.currentTerm, False)
 			except EOFError:
-				continue
-		#print("\nVotes I got: " + str(vote))
-		if vote >= self.majority:
+				term, answer = (self.currentTerm, False)
+			except socket.error:
+  				term, answer = (self.currentTerm, False)
+			if answer:
+				vote += 1
+		if vote > self.majority:
 			self.leaderID = self.ID
-			self.state = 2
-			#print("\n" + str(self.ID) + " is the leader!")
-			self.startLeading()
-		return
+			self.leaderLoop()
+		else:
+			#print("exit thread")
+			pass
 
-	'''
-	try_conn returns either the root RPC or False
-	if connection is not working
-	'''
-	def try_conn(self, n):
-		try:
-			a, b = self.server_list[n].split(':')
-			conn = rpyc.connect(a, b)
-			return conn.root
-
-		except socket.error:
-			return False
-		except EOFError:
-			return False
-
-	def startLeading(self):
-		self.leaderID = self.ID
-		Leading = True
-		conn_list = []
-		while Leading:
-			time.sleep(0.5)
-			for n in range(self.no_of_servers-1):
-				conn_list.append(self.try_conn(n))
+	def leaderLoop(self):
+		while True:
+			if self.stop_leader.is_set():
+				self.stop_leader.clear()
+				break
 			vote = 1
 			for n in range(self.no_of_servers-1):
 				try:
-					if conn_list[n] != False:
-						try:
-							term, answer = conn_list[n].AppendEntries(self.term, self.leaderID)
-						except ConnectionRefusedError:
-							term, answer = (self.term, -1)
-						except TypeError:
-							term, answer = (self.term, -1)
-						if term > self.term and not answer:
-							Leading = False
-							break
-						if answer:
-							vote+= 1
+					a, b = self.server_list[n].split(':')
+					conn = rpyc.connect(a, b).root
+					term, answer = conn.AppendEntries(self.currentTerm, self.ID)
+				except ConnectionRefusedError:
+					term, answer = (self.currentTerm, False)
 				except EOFError:
-					continue
-			if vote <= self.majority:
-				#print("\n" + str(self.ID) + " not leader")
-				self.state=0
-				Leading = False
+					term, answer = (self.currentTerm, False)
+				except socket.error:
+	  				term, answer = (self.currentTerm, False)
+				if answer:
+					vote += 1
+			if vote < self.majority:
+				break
+		#print("broken!")
+		self.NodeBegin()
 
+	def exposed_AppendEntries(self, term, leaderId):
+		if term < self.currentTerm:
+			return (self.currentTerm, False)
+		else:
+			self.fileLock.acquire()
+			self.node_timeout.cancel()
+			self.stop_leader.set()
+			self.currentTerm = term
+			self.leaderID = leaderId
+			self.fileLock.release()
+			#print("\n" + str(self.leaderID) + " is my leader with term: " + str(term) + " and my ID is " + str(self.ID))
+			return (self.currentTerm, True)
+
+	def exposed_RequestVote(self, term, candidateId):
+		if term > self.currentTerm and not self.Voted:
+			self.fileLock.acquire()
+			self.node_timeout.cancel()
+			self.currentTerm = term
+			self.votedFor = candidateId
+			self.Voted = True
+			self.fileLock.release()
+			return(self.currentTerm, True)
+		else:
+			return (self.currentTerm, False)
+
+	def stop(self):
+		self.stop_leader.wait(5)
 
 
 if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
-	server = ThreadPoolServer(RaftNode(sys.argv[1], sys.argv[2]), port = int(sys.argv[3]))
+	server = ThreadPoolServer(RaftNode(sys.argv[1]), port = 6000)
 	server.start()
