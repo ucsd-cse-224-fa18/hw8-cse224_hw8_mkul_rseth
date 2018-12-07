@@ -38,12 +38,15 @@ class RaftNode(rpyc.Service):
 		self.server_list = []
 		for a, b in confdict.items():
 			self.server_list.append(b)
-		self.stateFile = open("node"+str(server_no)+".txt", "w+")
+		self.stateFile = open("node"+str(server_no)+".txt", "a")
 		self.stateFile.close()
 		if self.is_non_zero_file(self.stateFile.name):
 			self.currentTerm, self.votedFor = self.check_state_file(self.stateFile.name)
-			self.currentTerm = int(currentTerm)
-			self.votedFor = int(votedFor)
+			self.currentTerm = int(self.currentTerm)
+			if self.votedFor != 'None':
+				self.votedFor = int(self.votedFor)
+			else:
+				self.votedFor = None
 		else:
 			self.currentTerm = -1
 			self.votedFor = None
@@ -56,7 +59,7 @@ class RaftNode(rpyc.Service):
 
 	def check_state_file(self, fname):
 		last = ''
-		with open(fname, "rb") as f:
+		with open(fname, "r") as f:
 			lines = f.read().splitlines()
 			last = lines[-1]
 		return tuple(last.split(','))
@@ -135,7 +138,7 @@ class RaftNode(rpyc.Service):
 			if vote < self.majority:
 				break
 		#print("broken!")
-		self.NodeBegin()
+		#self.NodeBegin()
 
 	def exposed_AppendEntries(self, term, leaderId):
 		if term < self.currentTerm:
