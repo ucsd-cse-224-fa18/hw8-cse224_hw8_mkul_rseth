@@ -43,15 +43,12 @@ class RaftNode(rpyc.Service):
 		if self.is_non_zero_file(self.stateFile.name):
 			self.currentTerm, self.votedFor = self.check_state_file(self.stateFile.name)
 			self.currentTerm = int(self.currentTerm)
-			if self.votedFor != 'None':
-				self.votedFor = int(self.votedFor)
-			else:
-				self.votedFor = None
 		else:
 			self.currentTerm = -1
 			self.votedFor = None
 		self.leaderID = None
 		self.ID = server_no
+		self.Voted = False
 		self.stop_leader = threading.Event()
 		self.fileLock = threading.Lock()
 		self.timerThread = threading.Thread(target=self.NodeBegin)
@@ -79,8 +76,7 @@ class RaftNode(rpyc.Service):
 
 	def NodeBegin(self):
 		while True:
-			timeout_val = randint(20, 40)
-			timeout_val = timeout_val / 10
+			timeout_val = self.no_of_servers / (int(self.ID) +1)
 			self.stop_leader.clear()
 			self.Voted = False
 			self.node_timeout = threading.Timer(float(timeout_val), self.beginElection)
@@ -88,6 +84,8 @@ class RaftNode(rpyc.Service):
 			self.node_timeout.join()
 
 	def beginElection(self):
+		if self.Voted == True:
+			return
 		self.fileLock.acquire()
 		self.currentTerm += 1
 		self.votedFor = self.ID
@@ -149,8 +147,9 @@ class RaftNode(rpyc.Service):
 			self.stop_leader.set()
 			self.currentTerm = term
 			self.leaderID = leaderId
+			self.Voted = True
 			self.fileLock.release()
-			#print("\n" + str(self.leaderID) + " is my leader with term: " + str(term) + " and my ID is " + str(self.ID))
+			print("\n" + str(self.leaderID) + " is my leader with term: " + str(term) + " and my ID is " + str(self.ID))
 			return (self.currentTerm, True)
 
 	def exposed_RequestVote(self, term, candidateId):
