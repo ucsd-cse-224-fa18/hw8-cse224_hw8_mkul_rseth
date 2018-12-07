@@ -1,13 +1,14 @@
 import rpyc
 import sys
+import os
+import random
 import re
 import threading
-import random
-import os
 
 FOLLOWER = "follower"
 LEADER = "leader"
 CANDIDATE = "candidate"
+
 
 '''
 A RAFT RPC server class.
@@ -24,142 +25,114 @@ class RaftNode(rpyc.Service):
         Initialize the class using the config file provided and also initialize
         any datastructures you may need.
 	"""
-	def __init__(self, config, nodenumber):
-
-		self.file = os.path.realpath(config)
-		self.fd = open(self.file, 'r')
-		self.filelines = self.fd.read().splitlines()
-		self.fd.close()
-		self.numberofnodes = int(re.match("N: (\d)", self.filelines[0])[1])
-		self.nodemap = {}
-		self.currentterm = 0
-		self.threshold = int((self.numberofnodes+1)/2)
-		self.number = nodenumber
-		self.leader = None
-		self.votedFor = None
-		self.votes = 0
-		self.status = FOLLOWER
-		self.time = 2
-		self.timer = threading.Timer(self.time, self.happen)
-		self.timer.start()
-
-	def happen(self):
+	def __init__(self, config, number):
+		self.nodeId = number
+		fd = open(os.path.realpath(config), 'r')
+		file = fd.read().splitlines()
+		fd.close()
+		self.numberofnodes = int(re.match("N: (\d)", file[0])[1])
+		self.nodelist = []
 		for i in range(self.numberofnodes) :
-			self.matchobject = re.match("node(\d): ([a-zA-Z0-9.]+):(\d+)",self.filelines[i+1])
-			self.raftnodenum = self.matchobject[1]
-			self.raftnodehost = self.matchobject[2]
-			self.raftnodeport = self.matchobject[3]
-			self.nodemap[int(self.raftnodenum)]=rpyc.connect(self.raftnodehost, self.raftnodeport)
-		self.timeout = random.randint(300, 500)/100
-		self.timer = threading.Timer(self.timeout, self.become_candidate)
-		self.timer.start()
+			matchobject = re.match("node\d: ([a-zA-Z0-9.]+):(\d+)",file[i+1])
+			raftnodehost = matchobject[1]
+			raftnodeport = matchobject[2]
+			self.nodelist.append((raftnodehost, raftnodeport))
+		self.status = FOLLOWER
+		self.votedFor = None
+		self.leader = None
+		self.currentTerm = 0
+		self.threshold = int((self.numberofnodes)/2)+1
+		self.votes = 0
+		print("---------------------------------------")
+		self.print_info()
+		self.stateFile = open("node"+str(self.nodeId)+".txt", "w+")
+		self.stateFile.close()
+		if self.is_non_zero_file(self.stateFile.name):
+			self.currentTerm, self.votedFor, _ = self.check_state_file(self.stateFile.name)
+			self.currentTerm = int(self.currentTerm)
+			self.votedFor = int(self.votedFor)
+		else:
+			self.currentTerm = 0
+			self.votedFor = None
+		self.fileLock = threading.Lock()
+		self.electiontimer = threading.Timer(random.randint(200, 500)/100, self.start_election)
+		self.electiontimer.start()
+		
+	def check_state_file(self, fname):
+		last = ''
+		with open(fname, 'r') as fd:
+			lines = fd.read().splitlines()
+			last = lines[-1]
+		return tuple(last.split(' '))
+
+	def is_non_zero_file(self, fpath):
+		return os.stat(fpath).st_size != 0
+
+	def update_state_file(self, fname):
+		with open(fname, 'a') as fd:
+			fd.write(str(self.currentTerm) + ' ' + str(self.votedFor) + ' ' + self.status + '\n')
 
 
-	def become_candidate(self):
+	def start_election(self):
+		self.fileLock.acquire()
+		self.votes = 1
+		self.votedFor = self.nodeId
+		self.status = CANDIDATE
+		self.currentTerm = self.currentTerm + 1
+		self.update_state_file(self.stateFile.name)
+		self.fileLock.release()
+		for i in range(self.numberofnodes):
+			if i != self.nodeId :
+				try :
+					raftnodehost, raftnodeport = self.nodelist[i]
+					conn = rpyc.connect(raftnodehost, raftnodeport)
+					term, voteGranted = conn.root.request_vote(self.currentTerm, self.nodeId)
+					if voteGranted :
+						self.votes = self.votes + 1
+					elif term > self.currentTerm :
+						self.status = FOLLOWER
+						break
+				except Exception as e :
+					# print("IN START ELECTION.   ", e)
+					raise e
+		if self.status == CANDIDATE and self.votes >= self.threshold :
+			self.status = LEADER
+			self.leader = self.nodeId
+			print("IN START ELECTION")
+			self.print_info()
+			self.votes = 0
+			self.votedFor = None
+			self.start_append()
+		else :
+			self.status = FOLLOWER
+			self.votedFor = None
+			self.leader = None
+			self.electiontimer = threading.Timer(random.randint(400, 500)/100, self.start_election)
+			self.electiontimer.start()
+
+
+	def start_append(self):
+		print("IN START APPEND")
+		self.print_info()
+		for i in range(self.numberofnodes):
+			if i != self.nodeId :
+				try :
+					raftnodehost, raftnodeport = self.nodelist[i]
+					conn = rpyc.connect(raftnodehost, raftnodeport)
+					term, success = conn.root.append_entries(self.currentTerm, self.nodeId)
+					if term > self.currentTerm : 
+						self.status = FOLLOWER
+						self.leader = None
+						self.currentTerm = term
+				except Exception as e :
+					# print("IN START APPEND.   ", e)
+					raise e
 		if self.status == FOLLOWER :
-			self.currentterm = self.currentterm + 1
-			self.votedFor = self.number
-			self.status = CANDIDATE
-			self.leader = self.number
-			self.votes = 1
-			for i in range(self.numberofnodes):
-				if self.number != i :
-					threading.Thread(target = self.request_votes, args = (i,)).start()
-			# 	try :
-			# 		answer = False
-			# 		term = self.currentterm
-			# 		if number != i :
-			# 			term, answer = self.nodemap[i].conn.vote(self.currentterm, self.number)
-			# 	except e :
-			# 		pass
-			# 	if answer :
-			# 		votes = votes + 1
-			# 	if term > currentterm :
-			# 		status = FOLLOWER
-			# 		currentterm = term
-			# 		break
-			# if votes >= self.threshold and status == CANDIDATE :
-			# 	leader = number
-			# 	status = LEADER
-			# 	self.timeout = 1
-			# 	self.timer = threading.Timer(timeout, self.update_nodes)
-			# 	self.timer.start()
-			# else :
-			# 	self.timeout = random.randint(300, 500)/100
-			# 	self.timer = threading.Timer(timeout, self.become_candidate)
-			# 	self.timer.start()
-
-
-	def request_votes(self, i):
-		answer = False
-		term = self.currentterm
-		try :
-			term, answer = self.nodemap[i].root.vote(self.currentterm, self.number)
-			if term > self.currentterm :
-				self.status = FOLLOWER
-				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(self.timeout, self.become_candidate)
-				self.timer.start()	
-			if answer :
-				self.votes = self.votes + 1
-				if self.votes > self.threshold and self.status == CANDIDATE :
-					self.leader = self.number
-					self.status = LEADER
-					print(self.currentterm, "IS LEADER")
-					self.leader_loop()
-		except Exception as e :
-			print("In request ", e)
-
-
-	def leader_loop(self):
-		if self.status == LEADER :
-			for i in range(self.numberofnodes):
-				if self.number != i :
-					threading.Thread(target = self.heartbeat_counter, args = (i,)).start()
-
-	def heartbeat_counter(self, i):
-		answer = False
-		term = self.currentterm
-		try :
-			term, answer = self.nodemap[i].root.append(self.currentterm, self.number)
-			if term > self.currentterm :
-				self.status = FOLLOWER
-				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(self.timeout, self.become_candidate)
-				self.timer.start()	
-			if answer :
-				if self.status == LEADER :
-					print(self.currentterm, "IS LEADER")
-					self.leader_loop()
-					self.timeout = random.randint(100, 250)/100
-					self.timer = threading.Timer(self.timeout, self.leader_loop)
-					self.timer.start()	
-		except Exception as e :
-			print("In heartbeat",e)
-
-	def exposed_append(self, term, requesternodenumber):
-		if self.status == FOLLOWER:
-			if self.currentterm <= term:
-				self.votedFor = None
-				self.leader = requesternodenumber
-				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(self.timeout, self.become_candidate)
-				self.timer.start()
-				return True, self.currentterm
-		if self.status == LEADER and self.currentterm < term:
-			self.leader = requesternodenumber
-			self.timeout = random.randint(300, 500)/100
-			self.timer = threading.Timer(self.timeout, self.become_candidate)
-			self.timer.start()
-			return True, self.currentterm
-		if self.status == CANDIDATE:
-			if self.currentterm <= term:
-				self.status = FOLLOWER
-				self.leader = requesternodenumber
-				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(self.timeout, self.become_candidate)
-				self.timer.start()
-				return True, self.currentterm
+			self.electiontimer = threading.Timer(random.randint(400, 500)/100, self.start_election)
+			self.electiontimer.start()
+		else :
+			self.appendtimer = threading.Timer(0.1, self.start_append)
+			self.appendtimer.start()
 
 
 	'''
@@ -176,22 +149,50 @@ class RaftNode(rpyc.Service):
 			return True
 		return False
 
-	def exposed_vote(self, term, requesternodenumber):
-		if self.status == FOLLOWER and votedFor == None:
-			if self.currentterm <= term:
-				self.currentterm = term
-				self.leader = requesternodenumber
-				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(self.timeout, self.become_candidate)
-				self.timer.start()
-				return True, self.currentterm
-			else :
-				return False, self.currentterm
-		else :
-			return False, self.currentterm
+	def exposed_request_vote(self, term, candidateId):
+		self.electiontimer.cancel()
+		self.fileLock.acquire()
+		voteGranted = False
+		if self.votedFor is None and term > self.currentTerm and self.status == FOLLOWER :
+			voteGranted = True
+			self.votedFor = candidateId
+			# self.currentTerm = term
+			self.update_state_file(self.stateFile.name)
+		print("IN REQUEST VOTES : ", candidateId, " ", term)
+		self.print_info()
+		self.electiontimer = threading.Timer(random.randint(400, 500)/100, self.start_election)
+		self.electiontimer.start()
+		self.fileLock.release()
+		return self.currentTerm, voteGranted
 
+	def exposed_append_entries(self, term, leaderId):
+		self.electiontimer.cancel()
+		self.fileLock.acquire()
+		success = True
+		if term < self.currentTerm :
+			success = False
+		else :
+			self.leader = leaderId
+			self.currentTerm = term
+			self.status = FOLLOWER
+			self.votedFor = None
+		print("IN APPEND ENTRIES : ", leaderId, " ", term)
+		self.print_info()
+		self.electiontimer = threading.Timer(random.randint(400, 500)/100, self.start_election)
+		self.electiontimer.start()
+		self.fileLock.release()
+		return term, success
+
+	def print_info(self):
+		print("Node ID : ", self.nodeId)
+		print("Term : ", self.currentTerm)
+		print("Voted For : ", self.votedFor)
+		print("Status : ", self.status)
+		print("Leader : ", self.leader)
+		print("---------------------------------------")
 
 if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
-	server = ThreadPoolServer(RaftNode(sys.argv[1], sys.argv[2]), port = int(sys.argv[3]))
+	server = ThreadPoolServer(RaftNode(sys.argv[1], int(sys.argv[2])), port = int(sys.argv[3]))
 	server.start()
+
