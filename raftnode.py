@@ -49,9 +49,9 @@ class RaftNode(rpyc.Service):
 			self.raftnodenum = self.matchobject[1]
 			self.raftnodehost = self.matchobject[2]
 			self.raftnodeport = self.matchobject[3]
-			self.nodemap[int(self.raftnodenum)](rpyc.connect(self.raftnodehost, self.raftnodeport))
+			self.nodemap[int(self.raftnodenum)]=rpyc.connect(self.raftnodehost, self.raftnodeport)
 		self.timeout = random.randint(300, 500)/100
-		self.timer = threading.Timer(timeout, self.become_candidate)
+		self.timer = threading.Timer(self.timeout, self.become_candidate)
 		self.timer.start()
 
 
@@ -60,11 +60,11 @@ class RaftNode(rpyc.Service):
 			self.currentterm = self.currentterm + 1
 			self.votedFor = self.number
 			self.status = CANDIDATE
-			self.leader = number
+			self.leader = self.number
 			self.votes = 1
 			for i in range(self.numberofnodes):
-				if number != i :
-					threading.Thread(target = request_votes, args = i).start()
+				if self.number != i :
+					threading.Thread(target = self.request_votes, args = (i,)).start()
 			# 	try :
 			# 		answer = False
 			# 		term = self.currentterm
@@ -94,61 +94,62 @@ class RaftNode(rpyc.Service):
 		answer = False
 		term = self.currentterm
 		try :
-			term, answer = self.nodemap[i].conn.vote(self.currentterm, self.number)
+			term, answer = self.nodemap[i].root.vote(self.currentterm, self.number)
 			if term > self.currentterm :
 				self.status = FOLLOWER
 				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(timeout, self.become_candidate)
+				self.timer = threading.Timer(self.timeout, self.become_candidate)
 				self.timer.start()	
 			if answer :
 				self.votes = self.votes + 1
 				if self.votes > self.threshold and self.status == CANDIDATE :
-					self.leader = number
+					self.leader = self.number
 					self.status = LEADER
-					print(self.term, "IS LEADER")
+					print(self.currentterm, "IS LEADER")
 					self.leader_loop()
-		except e :
-			pass
+		except Exception as e :
+			print("In request ", e)
 
 
 	def leader_loop(self):
 		if self.status == LEADER :
 			for i in range(self.numberofnodes):
-				if number != i :
-					threading.Thread(target = heartbeat_counter, args = i).start()
+				if self.number != i :
+					threading.Thread(target = self.heartbeat_counter, args = (i,)).start()
 
 	def heartbeat_counter(self, i):
 		answer = False
 		term = self.currentterm
 		try :
-			term, answer = self.nodemap[i].conn.append(self.currentterm, self.number)
+			term, answer = self.nodemap[i].root.append(self.currentterm, self.number)
 			if term > self.currentterm :
 				self.status = FOLLOWER
 				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(timeout, self.become_candidate)
+				self.timer = threading.Timer(self.timeout, self.become_candidate)
 				self.timer.start()	
 			if answer :
 				if self.status == LEADER :
-					print(self.term, "IS LEADER")
+					print(self.currentterm, "IS LEADER")
 					self.leader_loop()
 					self.timeout = random.randint(100, 250)/100
-					self.timer = threading.Timer(timeout, self.leader_loop)
+					self.timer = threading.Timer(self.timeout, self.leader_loop)
 					self.timer.start()	
-		except e :
-			pass
+		except Exception as e :
+			print("In heartbeat",e)
 
-	def append(self, term, requesternodenumber):
+	def exposed_append(self, term, requesternodenumber):
 		if self.status == FOLLOWER:
 			if self.currentterm <= term:
+				self.votedFor = None
 				self.leader = requesternodenumber
 				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(timeout, self.become_candidate)
+				self.timer = threading.Timer(self.timeout, self.become_candidate)
 				self.timer.start()
 				return True, self.currentterm
 		if self.status == LEADER and self.currentterm < term:
 			self.leader = requesternodenumber
 			self.timeout = random.randint(300, 500)/100
-			self.timer = threading.Timer(timeout, self.become_candidate)
+			self.timer = threading.Timer(self.timeout, self.become_candidate)
 			self.timer.start()
 			return True, self.currentterm
 		if self.status == CANDIDATE:
@@ -156,7 +157,7 @@ class RaftNode(rpyc.Service):
 				self.status = FOLLOWER
 				self.leader = requesternodenumber
 				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(timeout, self.become_candidate)
+				self.timer = threading.Timer(self.timeout, self.become_candidate)
 				self.timer.start()
 				return True, self.currentterm
 
@@ -176,12 +177,12 @@ class RaftNode(rpyc.Service):
 		return False
 
 	def exposed_vote(self, term, requesternodenumber):
-		if self.status == FOLLOWER :
+		if self.status == FOLLOWER and votedFor == None:
 			if self.currentterm <= term:
 				self.currentterm = term
 				self.leader = requesternodenumber
 				self.timeout = random.randint(300, 500)/100
-				self.timer = threading.Timer(timeout, self.become_candidate)
+				self.timer = threading.Timer(self.timeout, self.become_candidate)
 				self.timer.start()
 				return True, self.currentterm
 			else :
@@ -194,5 +195,3 @@ if __name__ == '__main__':
 	from rpyc.utils.server import ThreadPoolServer
 	server = ThreadPoolServer(RaftNode(sys.argv[1], sys.argv[2]), port = int(sys.argv[3]))
 	server.start()
-
-
