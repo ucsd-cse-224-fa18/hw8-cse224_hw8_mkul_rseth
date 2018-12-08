@@ -43,14 +43,17 @@ class RaftNode(rpyc.Service):
 		if self.is_non_zero_file(self.stateFile.name):
 			self.currentTerm, self.votedFor = self.check_state_file(self.stateFile.name)
 			self.currentTerm = int(self.currentTerm)
+			self.votedFor = int(self.votedFor)
 		else:
 			self.currentTerm = -1
 			self.votedFor = None
 		self.leaderID = None
+		self.vote = 0
 		self.ID = server_no
-		self.Voted = False
 		self.stop_leader = threading.Event()
 		self.fileLock = threading.Lock()
+		self.voteLock = threading.Lock()
+		self.appendLock = threading.Lock()
 		self.timerThread = threading.Thread(target=self.NodeBegin)
 		self.timerThread.start()
 
@@ -76,7 +79,8 @@ class RaftNode(rpyc.Service):
 
 	def NodeBegin(self):
 		while True:
-			timeout_val = self.no_of_servers / (int(self.ID) +1)
+			timeout_val = randint(30, 70)
+			timeout_val = timeout_val / 10
 			self.stop_leader.clear()
 			self.Voted = False
 			self.node_timeout = threading.Timer(float(timeout_val), self.beginElection)
@@ -84,34 +88,43 @@ class RaftNode(rpyc.Service):
 			self.node_timeout.join()
 
 	def beginElection(self):
-		if self.Voted == True:
-			return
 		self.fileLock.acquire()
 		self.currentTerm += 1
 		self.votedFor = self.ID
 		self.Voted = True
 		self.update_state_file(self.stateFile.name)
 		self.fileLock.release()
-		vote = 1
+		self.vote = 1
+		threads = []
 		for n in range(self.no_of_servers-1):
-			try:
-				a, b = self.server_list[n].split(':')
-				conn = rpyc.connect(a, b).root
-				term, answer = conn.RequestVote(self.currentTerm, self.ID)
-			except ConnectionRefusedError:
-				term, answer = (self.currentTerm, False)
-			except EOFError:
-				term, answer = (self.currentTerm, False)
-			except socket.error:
-				term, answer = (self.currentTerm, False)
-			if answer:
-				vote += 1
-		if vote > self.majority:
+			a, b = self.server_list[n].split(':')
+			#conn = rpyc.connect(a, b).root
+			#term, answer = conn.RequestVote(self.currentTerm, self.ID)
+			electThread = threading.Thread(target=self.get_vote, args=[a, b], kwargs={})
+			threads.append(electThread)
+			electThread.start()
+
+		for thread in threads:
+			thread.join()
+		if self.vote >= self.majority:
 			self.leaderID = self.ID
 			self.leaderLoop()
 		else:
 			#print("exit thread")
 			pass
+
+	def get_vote(self, a, b):
+		try:
+			conn = rpyc.connect(a, b).root
+			term, answer = conn.RequestVote(self.currentTerm, self.ID)
+		except ConnectionRefusedError:
+				term, answer = (self.currentTerm, False)
+		except EOFError:
+			term, answer = (self.currentTerm, False)
+		except socket.error:
+			term, answer = (self.currentTerm, False)
+		if answer :
+			self.vote += 1
 
 	def leaderLoop(self):
 		while True:
@@ -142,25 +155,24 @@ class RaftNode(rpyc.Service):
 		if term < self.currentTerm:
 			return (self.currentTerm, False)
 		else:
-			self.fileLock.acquire()
+			self.appendLock.acquire()
 			self.node_timeout.cancel()
 			self.stop_leader.set()
 			self.currentTerm = term
 			self.leaderID = leaderId
-			self.Voted = True
-			self.fileLock.release()
+			self.appendLock.release()
 			print("\n" + str(self.leaderID) + " is my leader with term: " + str(term) + " and my ID is " + str(self.ID))
 			return (self.currentTerm, True)
 
 	def exposed_RequestVote(self, term, candidateId):
 		if term > self.currentTerm and not self.Voted:
-			self.fileLock.acquire()
+			self.voteLock.acquire()
 			self.node_timeout.cancel()
 			self.currentTerm = term
 			self.votedFor = candidateId
 			self.update_state_file(self.stateFile.name)
 			self.Voted = True
-			self.fileLock.release()
+			self.voteLock.release()
 			return(self.currentTerm, True)
 		else:
 			return (self.currentTerm, False)
